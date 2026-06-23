@@ -1,0 +1,10 @@
+# ReFuN — core dependencies
+# Pin to the versions you trained with; ranges below are known-compatible.
+torch>=2.1
+transformers>=4.40
+datasets>=2.18
+sentencepiece>=0.1.99
+numpy>=1.24
+pandas>=2.0
+tree_sitter>=0.21
+tree_sitter_languages>=1.10

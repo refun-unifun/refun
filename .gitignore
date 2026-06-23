@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Data, models, caches, runs (do NOT commit large artifacts)
+cache_arrow*/
+runs/
+outputs/
+*_checkpoint*/
+checkpoints/
+slurm_logs/
+slurm_case_jobs/
+*.bin
+*.pt
+*.pth
+*.model
+*.arrow
+
+# Assets that must be provided locally (see README)
+assets/segmentation.model
+assets/word_cluster.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

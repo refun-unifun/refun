@@ -166,8 +166,8 @@ machine-specific absolute paths are baked in.
 | Learning rate | 5e-4 (encoders and decoder) |
 | Weight decay | 0.01 |
 | Scheduler | cosine, 2,000 warm-up steps |
-| Batch / grad accumulation | 4 × 32 (effective 128) |
-| Max epochs | 500, **early stopping** on validation token-F1 (patience 5) |
+| Batch / grad accumulation | 16 × 8 (effective 128; `auto_find_batch_size` falls back if OOM) |
+| Max epochs | up to 500, **early stopping** on validation token-F1 (patience 5) |
 | Label smoothing | 0.1 |
 | MoE | 4 experts, top-2 routing, load-balancing loss |
 | Loss | `L_sup + λ_kd·L_kd + λ_bal·L_bal` (λ_kd = λ_bal = 0.1) |

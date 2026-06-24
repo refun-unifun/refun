@@ -98,8 +98,8 @@ SP_MODEL_PATH = os.environ.get("REFUN_SP_MODEL", "./assets/segmentation.model")
 WORD_CLUSTER_PATH = os.environ.get("REFUN_WORD_CLUSTER", "./assets/word_cluster.json")
 CHUNK_LEN = 512
 LABEL_LEN = 16
-BATCH_GPU = 4
-GRAD_ACC = 32
+BATCH_GPU = 16
+GRAD_ACC = 8
 MAX_EPOCHS = 2000
 WARMUP = 2000
 WEIGHT_DECAY = 0.01
@@ -2067,6 +2067,8 @@ class MyCallback:
         if not is_rank0():
             return control
         epoch = int(state.epoch) if state.epoch is not None else 0
+        if epoch % 5 != 0:  # diagnostic eval only every 5 epochs (final metrics come from post-training inference)
+            return control
         eval_size = len(self.eval_ds) if self.eval_ds is not None else 0
         print(f"[Callback] Epoch {epoch} — running evaluation callback on subset.")
         print(
@@ -2493,7 +2495,7 @@ def main():
     if num_gpus == 0:
         print("[Init] Warning: No GPUs detected. Training will be very slow on CPU.")
 
-    BASE_BATCH_PER_GPU = 4
+    BASE_BATCH_PER_GPU = 16
     adjusted_batch_per_gpu = BASE_BATCH_PER_GPU if num_gpus > 0 else BATCH_GPU
     final_batch_per_gpu = adjusted_batch_per_gpu
     final_grad_acc = GRAD_ACC
@@ -2717,6 +2719,7 @@ def main():
         per_device_train_batch_size=final_batch_per_gpu,
         per_device_eval_batch_size=final_batch_per_gpu,
         gradient_accumulation_steps=final_grad_acc,
+        auto_find_batch_size=True,
         learning_rate=LR_DECODER,
         weight_decay=WEIGHT_DECAY,
         warmup_steps=WARMUP,

@@ -176,7 +176,22 @@ machine-specific absolute paths are baked in.
 
 Function-name quality is scored at the **token level**: identifiers are split
 (camelCase / underscores) and precision/recall/F1 are computed over token overlap.
-The code also reports exact match and CWordNet-F1 (synonym-cluster F1).
+The code also reports exact match and CWordNet-F1 (synonym-cluster F1). At the end
+of each run, final-eval metrics (token precision, recall, F1, exact, CWordNet-F1)
+are written to `metrics_<dataset>.json` and per-sample predictions to
+`*_inference_<dataset>.tsv` in the output directory.
+
+### Building the fusion-comparison table
+
+To assemble a Precision/Recall/F1 comparison table across fusions and datasets
+(MoE as the reference row, baselines shown as percentage deltas):
+
+```bash
+python scripts/make_results_table.py --root experiment_runs --out fusion_table.tex
+```
+
+It recomputes token-level metrics directly from the saved prediction TSVs, so it
+works once any subset of runs has finished (pending cells render as `--`).
 
 ---
 

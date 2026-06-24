@@ -419,6 +419,18 @@ def token_metrics(refs: List[str], hyps: List[str]):
     return f1
 
 
+def token_prf(refs: List[str], hyps: List[str]):
+    """Token-level (precision, recall, F1) on the same token-overlap basis as token_metrics."""
+    tp = fp = fn = 0
+    for g, p in zip(refs, hyps):
+        g_set = set(strip_tags(g).split())
+        p_set = set(strip_tags(p).split())
+        tp += len(g_set.intersection(p_set))
+        fp += len(p_set.difference(g_set))
+        fn += len(g_set.difference(p_set))
+    return prf(tp, fp, fn)
+
+
 def build_preprocess(tok, spm_obj, desc_field: str):
     def preprocess(examples):
         cols = [
@@ -2313,7 +2325,7 @@ def run_inference_on_all_datasets(
         pred_norm = [normalise(p, spm_obj) for p in preds_all]
         ref_norm = [normalise(r, spm_obj) for r in refs_all]
         exact = float(np.mean([p == g for p, g in zip(pred_norm, ref_norm)]))
-        tok_f = token_metrics(refs_all, preds_all)
+        tok_p, tok_r, tok_f = token_prf(refs_all, preds_all)
 
         tp_cw = fp_cw = fn_cw = 0
         for g_norm, p_norm in zip(ref_norm, pred_norm):
@@ -2327,12 +2339,26 @@ def run_inference_on_all_datasets(
 
         print(
             f"  - Test metrics (full test set) -> "
-            f"exact={exact:.3f}, token_F1={tok_f:.3f}, CWordNet_F1={cw_f:.3f}, "
+            f"exact={exact:.3f}, token_P={tok_p:.3f}, token_R={tok_r:.3f}, "
+            f"token_F1={tok_f:.3f}, CWordNet_F1={cw_f:.3f}, "
             f"num_samples={len(refs_all)}"
         )
 
         dataset_id = repo.split("/")[-1]
         os.makedirs(output_dir, exist_ok=True)
+        try:
+            with open(os.path.join(output_dir, f"metrics_{dataset_id}.json"), "w") as _mf:
+                json.dump({
+                    "dataset": repo,
+                    "num_samples": len(refs_all),
+                    "exact": exact,
+                    "token_precision": tok_p,
+                    "token_recall": tok_r,
+                    "token_f1": tok_f,
+                    "cwordnet_f1": cw_f,
+                }, _mf, indent=2)
+        except Exception as _e:
+            print(f"  - [warn] could not write metrics json: {_e}")
         out_path = os.path.join(output_dir, f"generic_inference_{dataset_id}.tsv")
 
         df = pd.DataFrame(

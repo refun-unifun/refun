@@ -12,6 +12,7 @@ import collections
 import re
 import hashlib
 import time
+import copy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -97,6 +98,31 @@ CACHE_DIR = "./cache_arrow_10"
 SP_MODEL_PATH = os.environ.get("REFUN_SP_MODEL", "./assets/segmentation.model")
 WORD_CLUSTER_PATH = os.environ.get("REFUN_WORD_CLUSTER", "./assets/word_cluster.json")
 CHUNK_LEN = 512
+# How the four view encoders relate to each other. This is NOT cosmetic -- it
+# changes encoder parameter count by ~3x and it differed between the proposed
+# model and the baselines in the original code:
+#
+#   "independent"  four deepcopied CodeT5 encoders sharing only `embed_tokens`,
+#                  so each view's attention/FFN weights can specialise.
+#                  This is what the MoE (proposed) model was trained with.
+#   "shared"       one encoder applied to all four views. Views stay
+#                  distinguishable through the <ASM>/<DEC>/<SEXP>/<DESC> marker
+#                  token prepended to each. This is what the concat,
+#                  cross_attention and simple_gating baselines were trained with.
+#
+# Defaults below reproduce the trained checkpoints. Note the confound this
+# creates: the proposed model had roughly three extra encoders' worth of
+# parameters relative to its baselines, so part of any MoE gain may be capacity
+# rather than fusion. Use --encoder_mode to hold this constant and separate the
+# two effects.
+ENCODER_MODE_BY_FUSION = {
+    "moe": "independent",
+    "concat": "shared",
+    "cross_attention": "shared",
+    "simple_gating": "shared",
+}
+ENCODER_MODE: Optional[str] = None  # CLI override; None = per-fusion default
+
 LABEL_LEN = 16
 BATCH_GPU = 16
 GRAD_ACC = 8
@@ -297,10 +323,83 @@ def is_rank0():
     return int(os.environ.get("RANK", 0)) == 0
 
 
-def load_sp(path: str):
+def build_encoders(base_model, fusion: str) -> nn.ModuleList:
+    """The four view encoders, per ENCODER_MODE_BY_FUSION (or --encoder_mode).
+
+    In "independent" mode each encoder is a deepcopy with its own attention and
+    feed-forward weights, but `embed_tokens` is shared across all four -- one
+    vocabulary, four specialising towers. In "shared" mode `get_encoder()`
+    returns the *same* module four times, so all four views run through one set
+    of weights.
+
+    The distinction is easy to miss: `nn.ModuleList([m.get_encoder() for _ in
+    range(4)])` looks like it makes four encoders and makes one.
+    """
+    mode = ENCODER_MODE or ENCODER_MODE_BY_FUSION.get(fusion, "shared")
+    base_encoder = base_model.get_encoder()
+    if mode == "shared":
+        print(f"[Init] Encoder mode: shared (1 encoder applied to 4 views).")
+        return nn.ModuleList([base_encoder for _ in range(4)])
+    if mode != "independent":
+        raise ValueError(f"encoder_mode must be 'shared' or 'independent', got {mode!r}")
+    encs = nn.ModuleList(
+        [base_encoder] + [copy.deepcopy(base_encoder) for _ in range(3)]
+    )
+    shared_embed = encs[0].embed_tokens
+    for enc in encs[1:]:
+        enc.embed_tokens = shared_embed
+    print("[Init] Encoder mode: independent (4 deepcopied encoders, shared embeddings).")
+    return encs
+
+
+def load_sp(path: str, required: bool = False):
+    """SentencePiece identifier segmenter used by the token-level metric.
+
+    Optional by design: it refines how identifiers are split into subtokens, and
+    `normalise` already has a no-sp fallback (camelCase/underscore splitting).
+    A missing model degrades the metric slightly rather than aborting a run, so
+    the smoke test and any reviewer without the asset can still train. Pass
+    `required=True` to turn a missing file back into an error.
+    """
+    if not path or not os.path.exists(path):
+        msg = f"[Assets] SentencePiece model not found at {path!r}"
+        if required:
+            raise FileNotFoundError(msg)
+        print(f"{msg}; falling back to rule-based identifier splitting.")
+        return None
     sp = spm.SentencePieceProcessor()
     sp.load(path)
     return sp
+
+
+def load_word_cluster(path: str, required: bool = False) -> dict:
+    """CodeWordNet synonym clusters for the CWordNet-F1 metric.
+
+    Also optional: without it CWordNet-F1 collapses to exact token F1, which is
+    reported alongside it anyway. Absence is announced, never silent.
+    """
+    if not path or not os.path.exists(path):
+        msg = f"[Assets] Word-cluster file not found at {path!r}"
+        if required:
+            raise FileNotFoundError(msg)
+        print(f"{msg}; CWordNet-F1 will equal plain token-F1.")
+        return {}
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _load_dataset_any(repo: str, cache_dir: Optional[str] = None):
+    """Load a corpus from the Hub, or from a local `save_to_disk` directory.
+
+    A local path lets the smoke test and any offline rebuild exercise the exact
+    training path without Hub access.
+    """
+    if os.path.isdir(repo):
+        from datasets import load_from_disk
+
+        print(f"[Data] Loading local dataset directory: {repo}")
+        return load_from_disk(repo)
+    return load_dataset(repo, cache_dir=cache_dir)
 
 
 def strip_tags(text: str) -> str:
@@ -622,6 +721,7 @@ def load_and_clean(
     eval_desc_field: str,
     dataset_repos: Optional[List[str]] = None,
     calculate_dynamic_label_len: bool = True,
+    drop_selfnamed: bool = False,
 ):
     global LABEL_LEN, GLOBAL_DUP_NAMES
 
@@ -637,7 +737,7 @@ def load_and_clean(
     # 1) Per-repo SymGen-style dedup
     for repo in dataset_repos:
         print(f"[Data] Loading repo: {repo}")
-        raw = load_dataset(repo, cache_dir=CACHE_DIR)
+        raw = _load_dataset_any(repo, CACHE_DIR)
         # SymGen dedup across splits
         kept_splits, counts, totals, _stats = symgen_style_dedup_in_memory(repo, raw)
         raw_multi[repo] = kept_splits
@@ -707,6 +807,24 @@ def load_and_clean(
         f"[Data] Combined after cross-repo funcname-dedup -> "
         f"train: {len(train_raw)}, test: {len(eval_raw) if eval_raw is not None else 0}"
     )
+
+    # 2b) Optionally drop functions that were never effectively stripped -- the
+    # decompiled signature still carries the gold name, so predicting it is a
+    # copy. Off by default so the headline numbers stay comparable with the
+    # published ones; see refun/audit_leakage.py for the measured rates.
+    if drop_selfnamed:
+        from .audit_leakage import is_self_named
+
+        def _keep(entry):
+            return not is_self_named(entry)
+
+        before_tr = len(train_raw)
+        train_raw = train_raw.filter(_keep, num_proc=8)
+        print(f"[Data] --drop_selfnamed: train {before_tr} -> {len(train_raw)}")
+        if eval_raw is not None:
+            before_ev = len(eval_raw)
+            eval_raw = eval_raw.filter(_keep, num_proc=8)
+            print(f"[Data] --drop_selfnamed: test  {before_ev} -> {len(eval_raw)}")
 
     # 3) Dynamic label length
     if calculate_dynamic_label_len:
@@ -805,7 +923,7 @@ class MultiViewCodeT5Concat(nn.Module):
     def __init__(self, tok):
         super().__init__()
         base_model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
-        self.encs = nn.ModuleList([base_model.get_encoder() for _ in range(4)])
+        self.encs = build_encoders(base_model, "concat")
         self.dec = base_model.get_decoder()
         self.lm_head = base_model.lm_head
         self.config = base_model.config
@@ -1057,7 +1175,7 @@ class MultiViewCodeT5CrossAttn(nn.Module):
     def __init__(self, tok):
         super().__init__()
         base_model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
-        self.encs = nn.ModuleList([base_model.get_encoder() for _ in range(4)])
+        self.encs = build_encoders(base_model, "cross_attention")
         self.dec = base_model.get_decoder()
         self.lm_head = base_model.lm_head
         self.config = base_model.config
@@ -1291,7 +1409,7 @@ class MultiViewCodeT5SimpleGating(nn.Module):
     def __init__(self, tok):
         super().__init__()
         base_model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
-        self.encs = nn.ModuleList([base_model.get_encoder() for _ in range(4)])
+        self.encs = build_encoders(base_model, "simple_gating")
         self.dec = base_model.get_decoder()
         self.lm_head = base_model.lm_head
         self.config = base_model.config
@@ -1616,7 +1734,7 @@ class MultiViewCodeT5MoE(nn.Module):
     def __init__(self, tok):
         super().__init__()
         base_model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
-        self.encs = nn.ModuleList([base_model.get_encoder() for _ in range(4)])
+        self.encs = build_encoders(base_model, "moe")
         self.dec = base_model.get_decoder()
         self.lm_head = base_model.lm_head
         self.config = base_model.config
@@ -2230,7 +2348,7 @@ def run_inference_on_all_datasets(
     print(f"[Inference] Running inference on {len(dataset_repos)} dataset(s).")
     for repo in dataset_repos:
         print(f"[Inference] Dataset: {repo}")
-        raw = load_dataset(repo, cache_dir=CACHE_DIR)
+        raw = _load_dataset_any(repo, CACHE_DIR)
 
         if "test" not in raw:
             print("  - No 'test' split found; skipping.")
@@ -2390,7 +2508,8 @@ def run_inference_on_all_datasets(
 
 def main():
     global NUM_EXPERTS, NUM_SELECTED_EXPERTS, MOE_LOSS_WEIGHT
-    global SP_MODEL_PATH, WORD_CLUSTER_PATH
+    global SP_MODEL_PATH, WORD_CLUSTER_PATH, ENCODER_MODE
+    global CHUNK_LEN, TOKENS_PER_ENCODER
 
     import argparse
 
@@ -2409,7 +2528,56 @@ def main():
         type=str,
         nargs="+",
         required=True,
-        help="HuggingFace dataset repo IDs to use for training/eval.",
+        help=(
+            "Corpora to train/eval on. Accepts config names from "
+            "refun.datasets ('x64_O0'), group aliases ('all', 'compiler', "
+            "'unifun', 'obfuscation', an arch like 'x64', an opt level like "
+            "'O0'), or fully-qualified HuggingFace repo IDs. Config names are "
+            "resolved against $REFUN_HF_NAMESPACE."
+        ),
+    )
+    parser.add_argument(
+        "--tokens_per_encoder",
+        type=int,
+        default=CHUNK_LEN,
+        help=(
+            "Token budget per view (default 512, as in the paper). Sets both "
+            "the tokenizer truncation length and the per-encoder sequence "
+            "length fed to fusion. Lower it to fit a smaller GPU or to run the "
+            "smoke test quickly; results are not comparable across values."
+        ),
+    )
+    parser.add_argument(
+        "--encoder_mode",
+        choices=["shared", "independent"],
+        default=None,
+        help=(
+            "How the four view encoders relate. 'independent' = 4 deepcopied "
+            "CodeT5 encoders sharing embeddings; 'shared' = 1 encoder applied "
+            "to all four views. Default reproduces the trained checkpoints: "
+            "independent for moe, shared for the three baselines. Set this "
+            "explicitly to hold encoder capacity constant across fusions and "
+            "separate a fusion effect from a parameter-count effect."
+        ),
+    )
+    parser.add_argument(
+        "--require_assets",
+        action="store_true",
+        help=(
+            "Fail if the SentencePiece segmenter or the CodeWordNet cluster "
+            "file is missing. Default is to warn and fall back, so a run is "
+            "never blocked by an optional metric asset."
+        ),
+    )
+    parser.add_argument(
+        "--drop_selfnamed",
+        action="store_true",
+        help=(
+            "Drop functions whose own decompiled signature still contains the "
+            "ground-truth name. These are dynamic-symbol thunks that survived "
+            "stripping (~27%% of x64_O0 test) and are a copy task, not an "
+            "inference task. See refun.audit_leakage."
+        ),
     )
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--output_dir", type=str, required=True)
@@ -2482,6 +2650,16 @@ def main():
             "No datasets provided. Pass one or more HuggingFace dataset repo IDs via --datasets."
         )
 
+    # Config names / group aliases -> fully-qualified repo IDs. A value that
+    # already contains '/' passes through untouched, so explicit repo IDs still
+    # work exactly as before.
+    from .datasets import resolve as _resolve_datasets
+
+    args.datasets = _resolve_datasets(args.datasets)
+    print(f"[Data] Resolved {len(args.datasets)} dataset repo(s):")
+    for _r in args.datasets:
+        print(f"         {_r}")
+
     set_seed(args.seed)
 
     NUM_EXPERTS = args.num_experts
@@ -2489,6 +2667,16 @@ def main():
     MOE_LOSS_WEIGHT = args.moe_loss_weight
     SP_MODEL_PATH = args.sp_model_path
     WORD_CLUSTER_PATH = args.word_cluster_path
+    ENCODER_MODE = args.encoder_mode
+    # Both must move together: CHUNK_LEN truncates the tokenizer output and
+    # TOKENS_PER_ENCODER slices/pads it to a fixed width before fusion. Setting
+    # only one silently pads every view back to 512 (or truncates to a shorter
+    # budget than was tokenised).
+    CHUNK_LEN = args.tokens_per_encoder
+    TOKENS_PER_ENCODER = args.tokens_per_encoder
+    if CHUNK_LEN != 512:
+        print(f"[Init] Token budget per view: {CHUNK_LEN} (paper default 512) "
+              f"-- results are not comparable to 512-token runs.")
 
     num_gpus = torch.cuda.device_count()
     print(f"[Init] Detected {num_gpus} GPU(s).")
@@ -2521,9 +2709,8 @@ def main():
         f"[Init] Tokenizer vocab size after adding special tokens: {len(tok)}"
     )
 
-    spm_obj = load_sp(SP_MODEL_PATH)
-    with open(WORD_CLUSTER_PATH) as f:
-        word_cluster = json.load(f)
+    spm_obj = load_sp(SP_MODEL_PATH, required=args.require_assets)
+    word_cluster = load_word_cluster(WORD_CLUSTER_PATH, required=args.require_assets)
 
     train_ds, eval_ds = load_and_clean(
         tok,
@@ -2532,6 +2719,7 @@ def main():
         args.eval_desc_field,
         dataset_repos=args.datasets,
         calculate_dynamic_label_len=True,
+        drop_selfnamed=args.drop_selfnamed,
     )
     collator = PadCollator(tok.pad_token_id)
 
@@ -2733,6 +2921,13 @@ def main():
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=2,
+        # Must stay False. In shared-encoder mode all four `encs.*` entries are
+        # the same module, so the state dict contains many aliased tensors;
+        # safetensors refuses to serialise those and the run dies at the first
+        # checkpoint. torch.save handles aliasing correctly. (Independent mode
+        # still aliases `embed_tokens` across the four encoders, so this is
+        # required for the MoE model too.)
+        save_safetensors=False,
         load_best_model_at_end=True,
         metric_for_best_model=METRIC_KEY,
         greater_is_better=True,

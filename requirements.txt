@@ -1,10 +1,25 @@
-# ReFuN — core dependencies
-# Pin to the versions you trained with; ranges below are known-compatible.
-torch>=2.1
-transformers>=4.40
-datasets>=2.18
+# ReFuN / UniFuN — core dependencies
+#
+# Versions below are the ones the release was verified against; the lower
+# bounds are known-compatible. Pin exactly if you need bit-reproducibility.
+
+torch>=2.1                 # verified: 2.7.1+cu126
+transformers>=4.40         # verified: 4.55.0
+datasets>=2.18             # verified: 4.0.0
 sentencepiece>=0.1.99
 numpy>=1.24
 pandas>=2.0
-tree_sitter>=0.21
-tree_sitter_languages>=1.10
+accelerate>=0.28
+
+# --- AST view generation (refun/sexpr.py) --------------------------------
+# Only needed to *build* a corpus. Training on the published corpora uses the
+# stored S-expression column and does not import these.
+# Byte-exact regeneration of the published column needs these exact versions;
+# see the fidelity note in refun/sexpr.py.
+tree_sitter>=0.24          # verified: 0.26.0
+tree_sitter_c>=0.23        # verified: 0.24.2
+
+# --- Reasoning-trace generation (refun/data_prep/reasoning.py) ------------
+# Optional: any OpenAI-compatible endpoint. Not imported unless you generate
+# traces yourself.
+# openai>=1.0

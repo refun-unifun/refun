@@ -10,17 +10,25 @@ venv/
 cache_arrow*/
 runs/
 outputs/
+experiment_runs/
 *_checkpoint*/
 checkpoints/
 slurm_logs/
 slurm_case_jobs/
+slurm_runs_*/
 *.bin
 *.pt
 *.pth
 *.model
 *.arrow
+*.safetensors
 
-# Assets that must be provided locally (see README)
+# Generated reports
+leakage*.json
+fusion_table.tex
+fusion_results.csv
+
+# Assets that must be provided locally (see README §7)
 assets/segmentation.model
 assets/word_cluster.json
 

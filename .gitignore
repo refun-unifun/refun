@@ -24,10 +24,17 @@ slurm_runs_*/
 *.arrow
 *.safetensors
 
-# Generated reports
+# Run outputs and generated reports -- results never belong in this repo
+eval_outputs/
+inference_results/
+final_model/
+metrics_*.json
+unifun_breakdown.json
+run_config.json
+*.tsv
+*.csv
 leakage*.json
 fusion_table.tex
-fusion_results.csv
 
 
 # Editor / OS

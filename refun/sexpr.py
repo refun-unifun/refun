@@ -1,45 +1,25 @@
 """Tree-sitter S-expression views of decompiled C.
 
-The AST view is the third of ReFuN's four encoder inputs. It is produced by
-parsing the *stripped* decompiled function with the tree-sitter C grammar and
-linearising the parse tree. Three linearisations are used in the paper; all
-three are reproduced here so the published corpus columns can be regenerated
-from `decompiled_code_stripped` alone.
+The AST view is the third of ReFuN's four encoder inputs: the stripped
+decompiled function parsed with the tree-sitter C grammar and linearised.
+Three linearisations are used, matching three corpus columns:
 
-    column in the corpus                          function here
-    --------------------------------------------- --------------------
-    S-Expression_of_decompiled_code_stripped      sexpr_with_text()
-    S-Expression_decompiled_code_*_clean          sexpr_clean()
-    Root Node                                     sexpr_fields()
+    S-Expression_of_decompiled_code_stripped   sexpr_with_text()   model input
+    S-Expression_decompiled_code_*_clean       sexpr_clean()       structure only
+    Root Node                                  sexpr_fields()      dedup only
 
-`sexpr_with_text` is the one the model actually consumes (`--view_sexpr`).
-It interleaves node types with the source span of each internal node, so the
-encoder sees structure and surface form together.
+`sexpr_clean` collapses every identifier, type and literal to IDENT/TYPE/LIT,
+so it answers "does structure alone help?" without surface-token memorisation.
 
-`sexpr_clean` is the identifier-free variant: every identifier, type name and
-literal collapses to `IDENT` / `TYPE` / `LIT`. It answers "does structure alone
-help?" and is what an ablation that wants to rule out surface-token memorisation
-should use.
+Ghidra output is not always valid C. tree-sitter is error-tolerant and yields
+ERROR nodes rather than failing, which is what we want; `parse_status` reports
+parse health so a broken decompiler run is visible rather than silent.
 
-Ghidra's decompiler output is not always valid C (it emits `undefined8`,
-`code *`, `__thiscall`, and occasional `WARNING:` comments). tree-sitter is
-error-tolerant and produces ERROR nodes rather than failing, which is the
-behaviour we want -- a partially-parsed function is still usable signal. Parse
-failure is reported via `parse_status`, never silently swallowed.
-
-REPRODUCTION FIDELITY
----------------------
-Regenerating the published x64_O0 train split with tree_sitter 0.26 /
-tree_sitter_c 0.24 reproduces `S-Expression_of_decompiled_code_stripped`
-byte-for-byte on 98.5% of records (n=200). The residual 1.5% are error-recovery
-differences: on malformed decompiler output the grammar version used to build
-the corpus inserted a MISSING token (typically `;`) where the current version
-does not. This is a tree-sitter version difference, not a change in the
-linearisation, and it only affects functions that already fail to parse
-cleanly. `sexpr_fields` ("Root Node") is more version-sensitive -- 49% exact --
-because tree-sitter's own canonical printer changed how it renders MISSING and
-ERROR nodes; that column is used only for deduplication, never as model input.
-Pin the grammar in `requirements.txt` if byte-identical regeneration matters.
+Fidelity: with tree_sitter 0.26 / tree_sitter_c 0.24, `sexpr_with_text`
+reproduces the published x64_O0 column byte-for-byte on 98.5% of records
+(n=200). The residue is error-recovery drift between grammar versions on input
+that already fails to parse, and only affects such input. `sexpr_fields` is
+more version-sensitive (49%) but is never a model input.
 """
 from typing import Optional
 
@@ -59,9 +39,8 @@ _LITERAL_NODES = frozenset({
 
 
 def _parser():
-    """Lazily build the C parser. Imported lazily so that importing `refun.train`
-    does not hard-require tree-sitter for users who only train on the published
-    corpus (where the S-expression column already exists)."""
+    """Build the C parser on first use. Imported lazily so training on the
+    published corpus does not require tree-sitter at all."""
     global _PARSER
     if _PARSER is None:
         try:
@@ -79,15 +58,13 @@ def _parser():
 
 
 def _quote(text: str, strict: bool = False) -> str:
-    """Source span as a double-quoted token.
+    """Source span as a quoted token.
 
-    The published corpus escapes *only* newlines: an embedded `"` or `\\` in the
-    decompiled source is written through unescaped, which makes the quoted span
-    ambiguous to a strict S-expression reader. That is reproduced faithfully by
-    default (`strict=False`) so this function regenerates the stored columns
-    byte-for-byte. Pass `strict=True` for a properly escaped, re-parseable span
-    when building a *new* corpus. The model never re-parses the span, so the
-    choice does not affect training -- only downstream tooling.
+    The published corpus escapes only newlines, leaving embedded quotes and
+    backslashes raw. That is reproduced by default so the stored columns
+    regenerate byte-for-byte; `strict=True` produces a properly escaped span
+    for a new corpus. The model never re-parses the span, so this affects
+    downstream tooling only.
     """
     if strict:
         return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
@@ -179,9 +156,8 @@ def sexpr_fields(code: str) -> str:
 
 
 def parse_status(code: str) -> dict:
-    """Parse health for one function. The corpus builder records this so that a
-    config with a broken decompiler run is visible as a spike in `error_nodes`
-    rather than as a quietly degraded input view."""
+    """Parse health for one function; a spike in `error_nodes` across a config
+    means a bad decompiler run rather than a quietly degraded input view."""
     if not code or not code.strip():
         return {"ok": False, "reason": "empty", "error_nodes": 0, "nodes": 0}
     root = _parser().parse(code.encode("utf-8", "replace")).root_node
@@ -204,7 +180,7 @@ def parse_status(code: str) -> dict:
 
 def add_sexpr_columns(example: dict, code_field: str = "decompiled_code_stripped",
                       prefix: str = "") -> dict:
-    """`datasets.map` helper: derive all three views for one record."""
+    """`datasets.map` helper deriving all three views for one record."""
     code = example.get(code_field) or ""
     return {
         f"{prefix}S-Expression_of_decompiled_code_stripped": sexpr_with_text(code),

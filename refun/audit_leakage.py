@@ -1,38 +1,31 @@
 """Measure ground-truth function-name leakage in the input views.
 
-WHY THIS EXISTS
----------------
 A function-name model is only interesting if the name is not already in its
-input. For decompiled binaries that is not automatic, and on this corpus it is
-frequently false. Two distinct mechanisms put the gold name into the input:
+input. On this corpus that is often false, via two mechanisms with different
+implications. Measured on x64_O0 test (n=794, names >= 4 chars):
 
-  1. NOT ACTUALLY STRIPPED. Dynamically-linked and thunk functions keep their
-     names in `.dynsym`, which survives `strip`. Ghidra recovers them, so the
-     "stripped" decompiled body reads `void abort(void)` or
-     `int fputs_unlocked(char *__s, FILE *__stream)`. The task is then a copy,
-     not an inference. Measured on x64_O0 test: 27.5% of records.
+  1. NOT ACTUALLY STRIPPED (28.2%). Dynamically-linked and thunk functions keep
+     their names in .dynsym, which survives strip. Ghidra recovers them, so the
+     "stripped" body reads `void abort(void)`. Predicting the name is a copy,
+     not an inference. This is a dataset-construction defect.
 
-  2. RESIDUAL STRING LITERALS. Assertion macros embed the enclosing function
-     name as a string constant:
+  2. RESIDUAL STRING LITERALS (8.6%). Assertion macros embed the enclosing
+     function name as a constant:
          FUN_0017c650("../../gold/object.h", 0x3c7, "do_output_section_offset")
-     This is genuine signal that a real analyst would also exploit, and it is
-     present in every published binary corpus. Measured on x64_O0 test: 7.8%.
+     This is a property of the domain, present in every binary corpus.
 
-Category 1 inflates scores and should be excluded from headline numbers, or at
-minimum reported separately. Category 2 is defensible but must be disclosed.
-The distinction matters because they have opposite implications: (1) is a
-dataset construction defect, (2) is a property of the domain.
+Per-view rates: decompiled C 36.9%, S-expression 36.9% (it quotes the source),
+assembly 0.0%, eval reasoning trace 22.3%, training trace 3.0%.
 
-The reasoning views leak too, at lower rates: the *evaluation* description
-(`model_generated_description_test`, produced without showing the LLM the gold
-name) contains it in 22.5% of records -- that is the teacher model succeeding,
-not a defect. The *training* trace (`reasoning_1`) is generated WITH the gold
-name in the prompt by design, as a distillation target; it is never used at
-evaluation time. Keeping those two fields distinct is why `--train_desc_field`
-and `--eval_desc_field` exist.
+The reasoning views differ by design. `model_generated_description_test` is
+produced without showing the teacher the gold name, so its 22.3% is the teacher
+succeeding. `reasoning_1` is generated *with* the gold name in the prompt as a
+distillation target and is never used at evaluation time -- which is why
+--train_desc_field and --eval_desc_field are separate flags.
 
-USAGE
------
+`is_self_named` is the predicate behind --drop_selfnamed, which excludes
+category 1 from training and evaluation.
+
     python -m refun.audit_leakage --configs x64_O0 --split test --n 2000
     python -m refun.audit_leakage --configs all --split test --out leakage.json
 """
@@ -53,8 +46,8 @@ VIEW_COLUMNS = [
 NAME_COL = "original_function_name"
 CODE_COL = "decompiled_code_stripped"
 
-# Names shorter than this are excluded: 2-3 character names ("cp", "add") match
-# incidentally everywhere and would report leakage that is really coincidence.
+# 2-3 character names ("cp", "add") match incidentally everywhere, so counting
+# them would report coincidence as leakage.
 MIN_NAME_LEN = 4
 
 
@@ -63,12 +56,9 @@ def _word_re(name: str) -> "re.Pattern":
 
 
 def classify(code: str, gold: str) -> str:
-    """How the gold name reached this record's decompiled body.
-
-    Returns one of: 'clean', 'signature', 'string_literal', 'other'.
-    'signature' means the name appears in the function's own declarator -- the
-    binary was not effectively stripped for this function.
-    """
+    """How the gold name reached this record's decompiled body: 'clean',
+    'signature' (in its own declarator, i.e. not effectively stripped),
+    'string_literal', or 'other'."""
     if not code or not gold:
         return "clean"
     pat = _word_re(gold)
@@ -83,11 +73,7 @@ def classify(code: str, gold: str) -> str:
 
 
 def is_self_named(record: dict) -> bool:
-    """True when the record's own decompiled signature carries the gold name.
-
-    This is the predicate behind `--drop_selfnamed` in the training script: the
-    single filter that removes the not-actually-stripped functions.
-    """
+    """True when the record's own decompiled signature carries the gold name."""
     gold = (record.get(NAME_COL) or "").strip()
     if len(gold) < MIN_NAME_LEN:
         return False
@@ -95,7 +81,7 @@ def is_self_named(record: dict) -> bool:
 
 
 def audit_split(ds, n: Optional[int] = None, seed: int = 0) -> Dict:
-    """Leakage rates for one split. `n` subsamples for speed; None scores all."""
+    """Leakage rates for one split; `n` subsamples, None scores every row."""
     total = len(ds)
     idx = range(total)
     if n and n < total:
@@ -165,10 +151,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             for c, p in rec["view_leak_pct"].items():
                 print(f"    {c:<45} {p:5.1f}%")
             m = rec["mechanism_pct"]
-            print(f"    -> not-stripped (own signature):  {m['signature']:5.1f}%   "
-                  f"[exclude with --drop_selfnamed]")
-            print(f"    -> assert/string literal only:    {m['string_literal']:5.1f}%   "
-                  f"[disclose, do not exclude]")
+            print(f"    -> not-stripped (own signature):  {m['signature']:5.1f}%  "
+                  f"(--drop_selfnamed excludes these)")
+            print(f"    -> assert/string literal only:    {m['string_literal']:5.1f}%")
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

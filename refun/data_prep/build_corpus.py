@@ -1,26 +1,20 @@
 """Assemble a ReFuN corpus from Ghidra JSON exports.
 
-Takes the `<binary>.orig.json` / `<binary>.stripped.json` pairs produced by
-`run_ghidra.py` and emits a HuggingFace dataset with the columns `refun.train`
-expects:
+Consumes the `<binary>.orig.json` / `<binary>.stripped.json` pairs from
+run_ghidra.py and emits a dataset with the columns refun.train expects:
 
     assembly_code                              stripped disassembly
     decompiled_code_stripped                   stripped decompiled C
-    S-Expression_of_decompiled_code_stripped   tree-sitter AST of the above
+    S-Expression_of_decompiled_code_stripped   AST of the above
     original_function_name                     label, from the unstripped side
-    reasoning_1                                training trace  (added separately)
-    model_generated_description_test           eval trace      (added separately)
 
-The reasoning columns are *not* produced here -- they need an LLM. Build the
-structural corpus first, then run `refun.data_prep.reasoning` over it and merge.
+The reasoning columns are added separately by refun.data_prep.reasoning, which
+needs an LLM.
 
-PAIRING AND SPLITS
-------------------
-Functions are paired across the two exports by entry-point address, which
-`strip` preserves. Splitting is by *binary*, never by function: two
-compilations of the same source, or two functions from one binary, share far
-too much for a function-level split to measure generalisation. A function-level
-split is the single most common way this task gets accidentally inflated.
+Functions are paired across the two exports by entry-point address, which strip
+preserves. Splitting is by binary, never by function: two functions from one
+binary, or one function at two optimisation levels, share too much for a
+function-level split to measure generalisation.
 
     python -m refun.data_prep.build_corpus \\
         --ghidra_json ghidra_out/ --out corpus_x64_O0/ \\
@@ -36,7 +30,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
-# Ghidra names unrecovered functions FUN_<addr>; those have no label to learn.
+# Ghidra names unrecovered functions FUN_<addr>; no label to learn from.
 _PLACEHOLDER = re.compile(r"^(FUN|SUB|UndefinedFunction|thunk_FUN)_[0-9a-fA-F]+$")
 
 MIN_ASM_LINES = 3
@@ -51,8 +45,7 @@ def _load(path: Path) -> dict:
 def _usable_name(name: str) -> bool:
     if not name or _PLACEHOLDER.match(name):
         return False
-    # Ghidra's operator/mangled leftovers make poor targets and are not names a
-    # reverse engineer would be asked to recover.
+    # Mangled/operator leftovers are not names a reverse engineer recovers.
     return not name.startswith(("_GLOBAL__", "__cxx_", "operator."))
 
 
@@ -105,7 +98,7 @@ def build_record(orig_fn: dict, strip_fn: dict, binary: str, package: str,
 
 def split_by_binary(records: List[dict], test_frac: float, seed: int
                     ) -> Tuple[List[dict], List[dict]]:
-    """Binary-level split. Every function of a binary lands on one side."""
+    """Every function of a binary lands on the same side of the split."""
     by_bin = defaultdict(list)
     for r in records:
         by_bin[(r["package"], r["binary_name"])].append(r)
@@ -119,11 +112,8 @@ def split_by_binary(records: List[dict], test_frac: float, seed: int
 
 
 def dedup_exact(records: List[dict]) -> List[dict]:
-    """Drop functions with an identical (name, normalised body) pair.
-
-    The same static library is linked into many binaries, so without this a
-    handful of libc helpers dominate both splits.
-    """
+    """Drop identical (name, normalised body) pairs. The same static library is
+    linked into many binaries, so without this a few libc helpers dominate."""
     seen, out = set(), []
     for r in records:
         body = re.sub(r"\s+", " ", r["decompiled_code_stripped"]).strip()

@@ -1,20 +1,17 @@
 """Drive Ghidra headless over a tree of binaries.
 
-Each binary is analysed twice -- once as shipped (symbols present) and once
-after `strip` -- because ReFuN needs both sides of every function: the stripped
-decompilation as input and the original name as the label. Pairing happens by
-entry-point address, which `strip` does not change.
+Each binary is analysed twice -- as shipped and after strip -- because ReFuN
+needs the stripped decompilation as input and the original name as the label.
+Pairing is by entry-point address, which strip does not change.
 
     python -m refun.data_prep.run_ghidra \\
-        --binaries /path/to/binaries --out /path/to/ghidra_json \\
-        --ghidra /opt/ghidra_11.2.1_PUBLIC --jobs 8
+        --binaries ./binaries --out ./ghidra_json \\
+        --ghidra $GHIDRA_INSTALL_DIR --jobs 8
 
-Output: one `<binary>.{orig,stripped}.json` pair per input, in the format the
-bundled `ghidra/export_all_features.py` emits. `build_corpus.py` consumes them.
-
-Ghidra is not a Python dependency and is not vendored: point `--ghidra` at an
-install, or set $GHIDRA_INSTALL_DIR. A binary that Ghidra fails on is recorded
-in `failures.json` and skipped, never silently dropped.
+Writes one `<binary>.{orig,stripped}.json` pair per input, consumed by
+build_corpus.py. Ghidra is not vendored: point --ghidra at an install or set
+$GHIDRA_INSTALL_DIR. Failures are recorded in failures.json, never dropped
+silently.
 """
 import argparse
 import json
@@ -42,7 +39,7 @@ def _headless(ghidra_dir: Path) -> Path:
 
 def analyse_one(binary: Path, out_json: Path, ghidra_dir: Path,
                 script_dir: Path, is_stripped: bool, timeout: int = 3600) -> dict:
-    """Run one headless analysis. Returns a status record."""
+    """Run one headless analysis, returning a status record."""
     out_json.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="refun_ghidra_") as tmp:
         stage = Path(tmp) / "out"
@@ -75,7 +72,7 @@ def analyse_one(binary: Path, out_json: Path, ghidra_dir: Path,
 
 
 def strip_copy(binary: Path, dest: Path, strip_bin: str = "strip") -> Path:
-    """`strip` a copy of the binary. Uses the cross `strip` when given one."""
+    """Strip a copy of the binary, using a cross `strip` when given one."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, dest)
     subprocess.run([strip_bin, "--strip-all", str(dest)],

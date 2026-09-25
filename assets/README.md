@@ -49,6 +49,4 @@ python -m refun.train ... --sp_model_path ... --word_cluster_path ...
 ```
 
 A missing asset degrades the corresponding metric with a printed warning rather
-than aborting the run. Pass `--require_assets` to make absence a hard error
-instead — worth doing in a batch job, where a warning scrolls past unnoticed
-and you end up with numbers computed on a different basis than you intended.
+than aborting the run. `--require_assets` makes absence a hard error instead.

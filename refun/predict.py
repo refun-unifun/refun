@@ -1,37 +1,21 @@
 """Load a trained ReFuN / UniFuN checkpoint and predict function names.
 
-    # single function, from files
-    python -m refun.predict --model runs/moe_x64_O0/final_model \\
-        --asm func.asm --code func.c
-
-    # a whole JSONL / HF dataset / corpus config
-    python -m refun.predict --model runs/moe_x64_O0/final_model \\
-        --input test.jsonl --out predictions.tsv
-
-    # a config from the registry
-    export REFUN_HF_NAMESPACE=<account>
+    python -m refun.predict --model runs/moe_x64_O0/final_model --asm f.asm --code f.c
     python -m refun.predict --model runs/moe_x64_O0/final_model \\
         --input x64_O0 --split test --limit 500 --out preds.tsv
 
-WHAT GETS LOADED
-----------------
-`final_model/` holds `pytorch_model.bin` (the full state dict) plus the
-tokenizer. It does *not* hold enough metadata on its own: the fusion strategy
-decides which class to build, and `LABEL_LEN` decides the shape of the fusion
-projection layers, so loading the state dict into a differently-configured
-model fails with a shape mismatch. Training therefore writes
-`run_config.json` alongside it, and this module reads that first.
+`--input` accepts a JSONL file, a local dataset directory, or a registry
+config name. Batch mode reports exact match and token P/R/F1.
 
-Checkpoints from before `run_config.json` existed can still be loaded by
-passing `--fusion` and `--label_len` explicitly.
+`final_model/` cannot be loaded from the weights alone: the fusion strategy
+picks the class, and LABEL_LEN (computed dynamically during training) shapes
+the fusion projection layers, so a mismatch fails on every fusion weight.
+Training writes both to run_config.json, which `load_model` reads. For
+checkpoints predating that file, pass --fusion and --label_len.
 
-THE FOUR INPUT VIEWS
---------------------
-The model always consumes four views. If you only have some of them, the rest
-may be passed empty -- the corresponding encoder sees just its marker token.
-Expect degraded accuracy; the reasoning view in particular carries a lot of the
-signal. To build the AST view from decompiled C, this module calls
-`refun.sexpr` automatically when `--code` is given but no S-expression is.
+The model consumes four views; missing ones may be empty, and the encoder then
+sees only its marker token. Accuracy drops accordingly, most sharply without
+the reasoning view. The AST view is derived from --code when not supplied.
 """
 import argparse
 import json
@@ -46,10 +30,9 @@ def load_model(model_dir: str, fusion: Optional[str] = None,
                label_len: Optional[int] = None,
                tokens_per_encoder: Optional[int] = None,
                device: Optional[str] = None):
-    """Rebuild the trained model and its tokenizer from `final_model/`.
+    """Rebuild the model and tokenizer from `final_model/`.
 
-    Returns `(model, tokenizer, run_config)`. The model is in eval mode on the
-    chosen device.
+    Returns (model, tokenizer, run_config), the model in eval mode.
     """
     from transformers import AutoTokenizer
     from . import train as T
@@ -62,9 +45,9 @@ def load_model(model_dir: str, fusion: Optional[str] = None,
     elif not (fusion and label_len):
         raise FileNotFoundError(
             f"{cfg_path} not found. This checkpoint predates run_config.json, "
-            "so the fusion strategy and label length cannot be recovered "
-            "automatically. Pass --fusion and --label_len explicitly "
-            "(--label_len must match training, or the state dict will not load)."
+            "so the fusion strategy and label length cannot be recovered. "
+            "Pass --fusion and --label_len; --label_len must match training or "
+            "the state dict will not load."
         )
 
     fusion = fusion or cfg.get("fusion")
@@ -75,8 +58,7 @@ def load_model(model_dir: str, fusion: Optional[str] = None,
     if not label_len:
         raise ValueError("label_len unknown; pass --label_len")
 
-    # These are module-level globals that the model classes read at construction
-    # time, so they must be set before build_model().
+    # Module-level globals read by the model classes at construction time.
     T.LABEL_LEN = int(label_len)
     T.CHUNK_LEN = int(tokens)
     T.TOKENS_PER_ENCODER = int(tokens)
@@ -89,11 +71,9 @@ def load_model(model_dir: str, fusion: Optional[str] = None,
     tok = AutoTokenizer.from_pretrained(model_dir, use_fast=False)
     model = T.build_model(fusion, tok)
 
-    # Training adds seven special tokens (<ASM> <DEC> <SEXP> <DESC> FUN and the
-    # two name tags) and resizes the embedding matrix to match. The saved
-    # tokenizer already carries them, but build_model() starts from a stock
-    # CodeT5 at 32100, so without this the state dict fails to load with a
-    # vocab-size mismatch on every embedding and the LM head.
+    # Training adds seven special tokens and resizes embeddings to match. The
+    # saved tokenizer carries them but build_model() starts from a stock CodeT5
+    # at 32100, so without this the state dict fails on every embedding.
     if len(tok) != model.config.vocab_size:
         print(f"[predict] resizing embeddings {model.config.vocab_size} -> {len(tok)}")
         model.resize_token_embeddings(len(tok))
@@ -117,7 +97,7 @@ def load_model(model_dir: str, fusion: Optional[str] = None,
 
 def _encode_views(tok, asm: str, code: str, sexpr: str, desc: str,
                   tokens_per_encoder: int, device: str):
-    """Tokenise the four views exactly as training does (marker + truncate)."""
+    """Tokenise the four views as training does: marker token, then truncate."""
     markers = ["<ASM>", "<DEC>", "<SEXP>", "<DESC>"]
     batch = {}
     for i, (marker, text) in enumerate(zip(markers, [asm, code, sexpr, desc]), 1):
@@ -132,7 +112,7 @@ def _encode_views(tok, asm: str, code: str, sexpr: str, desc: str,
 def predict_one(model, tok, asm: str = "", code: str = "", sexpr: str = "",
                 desc: str = "", tokens_per_encoder: int = 512,
                 max_new_tokens: Optional[int] = None) -> str:
-    """Predict a name for one function. Missing views may be empty strings."""
+    """Predict a name for one function; missing views may be empty."""
     from . import train as T
 
     if code and not sexpr:
@@ -140,7 +120,7 @@ def predict_one(model, tok, asm: str = "", code: str = "", sexpr: str = "",
             from .sexpr import sexpr_with_text
             sexpr = sexpr_with_text(code)
         except ImportError:
-            pass  # tree-sitter absent: run without the AST view
+            pass  # tree-sitter absent; proceed without the AST view
 
     device = next(model.parameters()).device
     batch = _encode_views(tok, asm, code, sexpr, desc, tokens_per_encoder, device)
@@ -152,7 +132,7 @@ def predict_one(model, tok, asm: str = "", code: str = "", sexpr: str = "",
 
 
 def _iter_records(spec: str, split: str, limit: int, cache_dir: Optional[str]):
-    """Records from a JSONL file, a local dataset dir, or a registry config."""
+    """Records from a JSONL file, a dataset directory, or a registry config."""
     if spec.endswith(".jsonl") and os.path.exists(spec):
         with open(spec, "r", encoding="utf-8") as fh:
             for i, line in enumerate(fh):

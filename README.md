@@ -36,8 +36,8 @@ refun-release/
 │   ├── unifun.py             # UniFuN entry point + per-config breakdown
 │   ├── datasets.py           # corpus registry (anonymised namespace)
 │   ├── sexpr.py              # tree-sitter AST view generation
-│   ├── predict.py            # load a checkpoint, run inference  ← §8
-│   ├── audit_leakage.py      # ground-truth leakage measurement  ← read §9
+│   ├── predict.py            # load a checkpoint, run inference (§8)
+│   ├── audit_leakage.py      # ground-truth leakage measurement (§9)
 │   └── data_prep/
 │       ├── run_ghidra.py     # binaries      -> Ghidra JSON
 │       ├── build_corpus.py   # Ghidra JSON   -> HF dataset (3 code views)
@@ -47,7 +47,7 @@ refun-release/
 │   ├── run_experiments.py    # (dataset × fusion) sweeps on local GPUs
 │   ├── submit_slurm.py       # one SLURM job per (dataset × fusion)
 │   ├── make_results_table.py # LaTeX fusion-comparison table
-│   ├── smoke_test.sh         # trains all four fusions on a fixture  ← §7
+│   ├── smoke_test.sh         # trains all four fusions on a fixture (§7)
 │   └── record_dataset_stats.py # refresh ROW_COUNTS from the live corpora
 ├── assets/                   # bundled eval assets (segmentation + clusters)
 ├── tests/
@@ -141,9 +141,6 @@ the same package set so cross-config comparisons are like-for-like:
 control), `obf_bcfobf` (bogus control flow), `obf_cffobf` (control-flow
 flattening), `obf_subobf` (instruction substitution).
 
-Four superseded rebuilds are recorded in `SUPERSEDED` so older run logs resolve;
-they are excluded from `ALL_CONFIGS` and from every reported result.
-
 Measured size, x64_O0: **62,415 train / 10,585 test** functions after the
 pipeline's own deduplication.
 
@@ -186,9 +183,8 @@ python -m refun.data_prep.reasoning \
 ```
 
 **Splits are by binary, never by function.** Two functions from one binary — and
-the same function compiled at two optimisation levels — share far too much for a
-function-level split to measure generalisation. This is the most common way
-results on this task get accidentally inflated.
+the same function compiled at two optimisation levels — share too much for a
+function-level split to measure generalisation.
 
 ### The AST view
 
@@ -202,11 +198,10 @@ results on this task get accidentally inflated.
 - `sexpr_fields` — tree-sitter's canonical printer with field labels; used only
   for deduplication.
 
-Regenerating the published x64_O0 column with `tree_sitter` 0.26 /
-`tree_sitter_c` 0.24 reproduces it **byte-for-byte on 98.5% of records**
-(n=200). The residual 1.5% are error-recovery differences on decompiler output
-that does not parse cleanly — a grammar-version effect, not a change in the
-linearisation. Details and the version caveat are in the module docstring.
+With `tree_sitter` 0.26 / `tree_sitter_c` 0.24, `sexpr_with_text` reproduces
+the published x64_O0 column **byte-for-byte on 98.5% of records** (n=200). The
+residual 1.5% is error-recovery drift between grammar versions on decompiler
+output that does not parse cleanly.
 
 ---
 
@@ -222,9 +217,9 @@ The fourth view is an LLM rationale, used asymmetrically **by design**:
   available at inference on a genuinely unseen binary.
 
 Pointing `--train_desc_field` and `--eval_desc_field` at the same column — in
-particular pointing eval at `reasoning_1` — would leak the answer and produce a
-large, entirely spurious improvement. Both prompt templates are reproduced
-verbatim in `refun/data_prep/reasoning.py`; print them with `--show`.
+particular pointing eval at `reasoning_1` — leaks the answer. Both prompt
+templates are reproduced verbatim in `refun/data_prep/reasoning.py`; print them
+with `--show`.
 
 ---
 
@@ -252,8 +247,7 @@ downloading:
 They affect scoring only — the model never sees them. See
 [`assets/README.md`](assets/README.md). If you point the paths elsewhere and a
 file is missing, the metric degrades with a printed warning rather than
-aborting; `--require_assets` makes absence a hard error, which is what you want
-in a batch job where a warning scrolls past unnoticed.
+aborting. `--require_assets` makes absence a hard error instead.
 
 ---
 
@@ -379,7 +373,7 @@ not a defect), training trace 3.0%.
 
 These have **opposite implications**. The first is a dataset-construction defect
 and inflates scores; the second is a property of the domain and is present in
-every published binary corpus. Measure both on your configs:
+every published binary corpus. To measure both across configs:
 
 ```bash
 python -m refun.audit_leakage --configs all --split test --out leakage.json
@@ -391,9 +385,8 @@ and exclude the first from headline numbers with:
 python -m refun.train --fusion moe --datasets x64_O0 --drop_selfnamed ...
 ```
 
-`--drop_selfnamed` is **off by default** so that default runs stay comparable
-with previously published numbers. Reporting both the filtered and unfiltered
-score is the honest presentation.
+`--drop_selfnamed` is off by default so that default runs stay comparable with
+previously published numbers.
 
 ---
 
@@ -436,14 +429,14 @@ The four fusions were **not** trained with the same encoder capacity:
 | `moe` (proposed) | **4 independent** CodeT5 encoders (`deepcopy`), sharing only `embed_tokens` |
 | `concat`, `cross_attention`, `simple_gating` | **1 shared** encoder applied to all four views |
 
-In the shared configuration the views remain distinguishable through the
-`<ASM>` / `<DEC>` / `<SEXP>` / `<DESC>` marker token prepended to each, so it is
-a legitimate design — but it means the proposed model carried roughly three
-extra encoders' worth of parameters relative to its own baselines. **Part of any
-MoE gain may therefore be capacity rather than fusion strategy.**
+In the shared configuration the views stay distinguishable through the `<ASM>`
+/ `<DEC>` / `<SEXP>` / `<DESC>` marker token prepended to each, so it is a
+legitimate design — but the proposed model carried roughly three extra
+encoders' worth of parameters relative to its own baselines, so a gain measured
+at the defaults confounds capacity with fusion strategy.
 
-`refun/train.py` reproduces this as-trained by default so the published numbers
-remain comparable. To separate the two effects, hold it constant:
+`train.py` reproduces the as-trained configuration by default. To hold encoder
+capacity constant across fusions:
 
 ```bash
 # All four fusions at equal encoder capacity
@@ -453,10 +446,9 @@ for f in concat cross_attention simple_gating moe; do
 done
 ```
 
-The easy-to-miss detail behind this: `nn.ModuleList([m.get_encoder() for _ in
-range(4)])` looks like it builds four encoders and builds one — `get_encoder()`
-returns the same module object every call. `build_encoders()` makes the choice
-explicit.
+`nn.ModuleList([m.get_encoder() for _ in range(4)])` looks like it builds four
+encoders and builds one: `get_encoder()` returns the same module object every
+call. `build_encoders()` makes the choice explicit.
 
 ---
 
@@ -515,10 +507,10 @@ cross-corpus pass that removes function names appearing in more than one config.
 The per-epoch validation callback scores a random subset (`--eval_subset_cb`,
 default 64) for speed; the full eval set is scored once at the end.
 
-For UniFuN, `unifun_breakdown.json` reports per-config metrics plus **both** a
-macro average (every config weighted equally) and a row-weighted average
-(dominated by the large O0 configs). A pooled score can improve while every hard
-config gets worse, so both are reported.
+For UniFuN, `unifun_breakdown.json` reports per-config metrics plus a macro
+average (every config weighted equally) and a row-weighted average (dominated
+by the large O0 configs). A pooled score can improve while every hard config
+degrades, so both are given.
 
 ---
 
@@ -530,3 +522,4 @@ resolvable regardless of what happens to any account.
 
 The author block is withheld while double-blind review is in progress; the
 Zenodo record carries the canonical metadata.
+

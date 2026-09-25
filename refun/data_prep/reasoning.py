@@ -1,43 +1,27 @@
 """Reasoning-trace distillation: the fourth encoder view.
 
-ReFuN's fourth view is a natural-language rationale about what the function
-does. It is produced by prompting a foundation LLM and is used in two different
-ways, which must not be confused:
+The fourth view is a natural-language rationale about what a function does,
+used asymmetrically:
 
-  TRAINING TRACE  (`reasoning_1`, from PROMPT_TRAIN)
-      The teacher is shown the decompiled code *and the ground-truth name*, and
-      asked to justify that name while never uttering it. This is a distillation
-      target: it encodes why the name fits. It is only valid as a training
-      signal -- using it at evaluation time would leak the answer.
+  reasoning_1 (training, PROMPT_TRAIN)
+      The teacher sees the code *and the ground-truth name* and justifies that
+      name without stating it. A distillation target encoding why the name
+      fits; valid only as a training signal.
 
-  EVALUATION TRACE (`model_generated_description_test`, from PROMPT_EVAL)
-      The teacher is shown only the decompiled code and must propose a name and
-      describe the function. Nothing about the gold name enters the prompt, so
-      this is available at inference time on a genuinely unseen binary.
+  model_generated_description_test (evaluation, PROMPT_EVAL)
+      The teacher sees only the code. Nothing about the gold name enters the
+      prompt, so this is available at inference on an unseen binary.
 
-That asymmetry is the reason `refun.train` takes separate `--train_desc_field`
-and `--eval_desc_field` flags. Pointing both at `reasoning_1` would produce a
-large and entirely spurious improvement.
+Pointing --train_desc_field and --eval_desc_field at the same column leaks the
+answer. Both templates below are reproduced exactly as used, including their
+original typography, so regenerated traces match the published distribution.
 
-Both templates are reproduced below exactly as used to build the corpus,
-including their original typography (the curly apostrophes and the '<…>'
-ellipses are in the deployed prompts and are kept so regenerated traces match
-the distribution of the published ones).
-
-USAGE
------
-    # Show the prompts that built the corpus
     python -m refun.data_prep.reasoning --show
-
-    # Regenerate traces for a JSONL of records (one JSON object per line)
-    python -m refun.data_prep.reasoning \\
-        --in functions.jsonl --out traces.jsonl \\
+    python -m refun.data_prep.reasoning --in functions.jsonl --out traces.jsonl \\
         --mode eval --model <model-id> --base_url <openai-compatible-endpoint>
 
 The generator speaks the OpenAI chat-completions protocol, which every vendor
-and every local server (vLLM, llama.cpp, Ollama) exposes. No specific provider
-is hardcoded -- the model id and endpoint are yours to choose, and the paper
-records which teacher was used.
+and local server (vLLM, llama.cpp, Ollama) exposes. No provider is hardcoded.
 """
 import argparse
 import json
@@ -47,7 +31,7 @@ import sys
 import time
 from typing import Dict, Iterable, Iterator, List, Optional
 
-# --- The two prompt templates, verbatim -----------------------------------
+# --- Prompt templates, verbatim as used to build the corpus ---------------
 
 PROMPT_TRAIN = """You are an expert in software reverse engineering and semantic function analysis.
 You will be provided with:
@@ -106,9 +90,8 @@ _SEC = re.compile(
 def parse_response(raw: str) -> Dict[str, str]:
     """Split a teacher response into its three labelled sections.
 
-    Returns empty strings for absent sections rather than raising: a teacher
-    occasionally omits the counterfactual, and one malformed generation should
-    not abort a corpus build. Count the empties instead -- `--report` does.
+    Absent sections come back empty rather than raising, so one malformed
+    generation does not abort a corpus build.
     """
     if not raw:
         return {"reasoning": "", "counterfactual": "", "function_name": ""}
@@ -127,13 +110,9 @@ def parse_response(raw: str) -> Dict[str, str]:
 
 
 def scrub_name(text: str, gold: Optional[str]) -> str:
-    """Remove the gold name from a trace if the teacher leaked it anyway.
-
-    The training prompt asks the teacher not to state the name; compliance is
-    imperfect (~3% on x64_O0). Since `reasoning_1` is a training-only field the
-    leak is not fatal, but scrubbing keeps the trained model from learning to
-    copy a span it will never see at inference.
-    """
+    """Remove the gold name from a trace where the teacher stated it anyway
+    (~3% on x64_O0), so the model cannot learn to copy a span it will never
+    see at inference."""
     if not text or not gold or len(gold) < 4:
         return text or ""
     return re.sub(r"(?<![A-Za-z0-9_])" + re.escape(gold) + r"(?![A-Za-z0-9_])",
@@ -150,9 +129,8 @@ def generate(records: Iterable[Dict], model: str, mode: str = "eval",
              retries: int = 3, sleep: float = 2.0) -> Iterator[Dict]:
     """Yield one parsed trace per input record, in order.
 
-    Any OpenAI-compatible endpoint works. Failures are yielded with an `error`
-    key rather than dropped, so the output line count always matches the input
-    and a partial run can be resumed by filtering on that key.
+    Failures carry an `error` key rather than being dropped, so output length
+    matches input and a partial run resumes by filtering on that key.
     """
     try:
         from openai import OpenAI
@@ -183,7 +161,7 @@ def generate(records: Iterable[Dict], model: str, mode: str = "eval",
                 raw = resp.choices[0].message.content or ""
                 err = None
                 break
-            except Exception as exc:  # noqa: BLE001 - surface, do not swallow
+            except Exception as exc:  # noqa: BLE001
                 err = f"{type(exc).__name__}: {exc}"
                 if attempt < retries - 1:
                     time.sleep(sleep * (attempt + 1))

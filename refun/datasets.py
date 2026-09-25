@@ -1,35 +1,31 @@
-"""Dataset registry for ReFuN / UniFuN.
+"""Dataset registry.
 
-DOUBLE-BLIND NOTE
------------------
-The corpora live on the HuggingFace Hub under a single account. The account
-name is *not* committed to this repository, because it identifies the authors.
-Every repo ID is therefore stored here as a bare name and joined to a namespace
-read from the environment:
+Archival source: https://zenodo.org/records/15530083
 
-    export REFUN_HF_NAMESPACE=<the account>
-    python -m refun.train --configs x64_O0 ...
+The corpora are also mirrored on the HuggingFace Hub. Repo IDs are stored here
+as bare names and joined to $REFUN_HF_NAMESPACE at load time, so the account
+that hosts them is not committed to this repository:
 
-Reviewers who have been given the namespace out of band can run everything
-unchanged. Without it, `repo_id()` raises with an explanatory message rather
-than silently trying to download `<anonymized>/...`.
+    export REFUN_HF_NAMESPACE=<account>
+    python -m refun.train --datasets x64_O0 ...
 
-Config naming is `<arch>_<opt>` for the compiler corpora and `obf_<pass>` for
-the obfuscation study. The upstream repo names are historical and inconsistent
-(several were rebuilt mid-project and kept a `recreated`/`final` prefix); the
-mapping below is the single source of truth that hides that inconsistency from
-the rest of the code.
+Without it, `repo_id()` raises rather than silently trying to download from a
+placeholder namespace. Fully-qualified repo IDs and local paths bypass it.
+
+Upstream repo names are historical and inconsistent; the mapping below is the
+single source of truth that keeps that out of the rest of the code.
 """
 import os
 from typing import Dict, List, Optional
 
 NAMESPACE_ENV = "REFUN_HF_NAMESPACE"
+ZENODO_RECORD = "https://zenodo.org/records/15530083"
 _ANON = "<anonymized>"
 
 ARCHES = ("x64", "x86", "arm", "mips")
 OPT_LEVELS = ("O0", "O1", "O2", "O3")
 
-# --- The 16 compiler configs (4 architectures x 4 optimisation levels) ------
+# 4 architectures x 4 optimisation levels.
 COMPILER_DATASETS: Dict[str, str] = {
     "x64_O0": "prompt_reverse_engineering_code_reverse_engineering_code_dataset_O0_x64_O0",
     "x64_O1": "prompt_rreverse_engineering_code_dataset_O1_x64_O1",
@@ -52,44 +48,33 @@ COMPILER_DATASETS: Dict[str, str] = {
     "mips_O3": "prompt_reverse_engineering_code_reverse_engineering_code_dataset_O3_mips_O3",
 }
 
-# --- The obfuscation study (Obfuscator-LLVM passes, x64/O0) ----------------
+# Obfuscator-LLVM passes, x64/O0.
 OBFUSCATION_DATASETS: Dict[str, str] = {
-    "obf_orig":   "prompt_obfuscated_binaries_orig",     # unobfuscated control
-    "obf_bcfobf": "prompt_obfuscated_binaries_bcfobf",   # bogus control flow
+    "obf_orig":   "prompt_obfuscated_binaries_orig",        # unobfuscated control
+    "obf_bcfobf": "prompt_obfuscated_binaries_bcfobf",      # bogus control flow
     "obf_cffobf": "All_prompt_obfuscated_binaries_cffobf",  # control-flow flattening
     "obf_subobf": "All_prompt_obfuscated_binaries_subobf",  # instruction substitution
 }
 
-# Superseded rebuilds kept only so an older run log can be resolved. Not part of
-# any reported result -- `ALL_CONFIGS` deliberately excludes them.
-SUPERSEDED: Dict[str, str] = {
-    "arm_O1__v1": "prompt_reverse_engineering_code_dataset_O1_arm_O1",
-    "x86_O1__v1": "recreated_reverse_engineering_code_dataset_O1_x86_O1",
-    "x86_O2__v1": "recreated_reverse_engineering_code_dataset_O2_x86_O2",
-    "x86_O3__v1": "recreated_reverse_engineering_code_dataset_O3_x86_O3",
-}
-
 DATASETS: Dict[str, str] = {**COMPILER_DATASETS, **OBFUSCATION_DATASETS}
-_RESOLVABLE: Dict[str, str] = {**DATASETS, **SUPERSEDED}
 
 ALL_CONFIGS = tuple(DATASETS)
 COMPILER_CONFIGS = tuple(COMPILER_DATASETS)
 OBFUSCATION_CONFIGS = tuple(OBFUSCATION_DATASETS)
 
-# UniFuN: one model over every compiler config at once. ReFuN trains one model
-# per config. This tuple is the only thing that differs between the two.
+# UniFuN trains one model over every compiler config; ReFuN trains one per
+# config. This tuple is the only difference between them.
 UNIFUN_CONFIGS = COMPILER_CONFIGS
 
-# Row counts as loaded (train/test), recorded so a later mismatch is detectable
-# rather than silent. Populated by `scripts/record_dataset_stats.py`; a config
-# absent here has simply not been measured on this machine yet.
+# Row counts as loaded, so a later mismatch is detectable rather than silent.
+# Refresh with scripts/record_dataset_stats.py.
 ROW_COUNTS: Dict[str, Dict[str, int]] = {
     "x64_O0": {"train": 62415, "test": 10585},
 }
 
 
 def namespace(required: bool = True) -> Optional[str]:
-    """The HuggingFace account holding the corpora, from $REFUN_HF_NAMESPACE."""
+    """The HuggingFace account hosting the corpora, from $REFUN_HF_NAMESPACE."""
     ns = os.environ.get(NAMESPACE_ENV, "").strip().strip("/")
     if ns:
         return ns
@@ -97,30 +82,30 @@ def namespace(required: bool = True) -> Optional[str]:
         return None
     raise RuntimeError(
         f"{NAMESPACE_ENV} is not set.\n"
-        "This is an anonymised artifact: the HuggingFace account that hosts the\n"
-        "corpora is not committed to the repository. Set it before running:\n"
+        f"Set it to the account hosting the Hub mirror:\n"
         f"    export {NAMESPACE_ENV}=<account>\n"
-        "or pass fully-qualified repo IDs directly with --datasets."
+        f"or pass a fully-qualified repo ID or a local path to --datasets.\n"
+        f"The corpora are also archived at {ZENODO_RECORD}."
     )
 
 
 def repo_id(config: str) -> str:
-    """Fully-qualified HF repo ID for a config name.
+    """Fully-qualified repo ID for a config name.
 
-    A value that already contains '/' is treated as an explicit repo ID and
-    returned untouched, so --datasets accepts config names and raw IDs alike.
+    Values containing '/' are treated as explicit repo IDs and returned
+    unchanged, so --datasets accepts config names and repo IDs alike.
     """
     if "/" in config:
         return config
-    if config not in _RESOLVABLE:
+    if config not in DATASETS:
         raise KeyError(
             f"unknown config {config!r}; known configs: {', '.join(sorted(DATASETS))}"
         )
-    return f"{namespace()}/{_RESOLVABLE[config]}"
+    return f"{namespace()}/{DATASETS[config]}"
 
 
 def resolve(configs: List[str]) -> List[str]:
-    """Map a mixed list of config names / repo IDs / group aliases to repo IDs."""
+    """Map config names, aliases and repo IDs to a deduplicated list of IDs."""
     out: List[str] = []
     for c in configs:
         for expanded in _expand_alias(c):
@@ -131,8 +116,8 @@ def resolve(configs: List[str]) -> List[str]:
 
 
 def _expand_alias(token: str) -> List[str]:
-    """Group aliases: 'all', 'compiler', 'obfuscation', 'unifun', an arch name
-    ('x64'), or an opt level ('O0')."""
+    """Group aliases: 'all', 'compiler'/'unifun', 'obfuscation', an arch name,
+    or an optimisation level."""
     t = token.strip()
     if "/" in t:
         return [t]
@@ -160,18 +145,18 @@ def opt_of(config: str) -> str:
 
 
 def config_of_repo(rid: str) -> str:
-    """Inverse of `repo_id` -- config name for a repo ID, for labelling outputs."""
+    """Inverse of `repo_id`, for labelling output files."""
     bare = rid.split("/")[-1]
-    for cfg, name in _RESOLVABLE.items():
+    for cfg, name in DATASETS.items():
         if name == bare:
             return cfg
     return bare
 
 
 def describe() -> str:
-    """Human-readable inventory; used by `python -m refun.datasets`."""
     ns = namespace(required=False) or _ANON
-    lines = [f"namespace: {ns}  (from ${NAMESPACE_ENV})", ""]
+    lines = [f"archival source: {ZENODO_RECORD}",
+             f"namespace: {ns}  (from ${NAMESPACE_ENV})", ""]
     lines.append(f"compiler configs ({len(COMPILER_CONFIGS)}):")
     for c in COMPILER_CONFIGS:
         rc = ROW_COUNTS.get(c)

@@ -15,14 +15,11 @@ and this entry point exists to make that explicit, to set the defaults the
 unified runs used, and to emit the per-config breakdown that the pooled numbers
 would otherwise hide.
 
-WHY THE BREAKDOWN MATTERS
--------------------------
-Pooled F1 over all 16 configs is dominated by the largest ones (x64_O0 and
-x86_O0 contribute far more rows than mips_O3). A pooled score can improve while
-every hard config gets worse. `refun.train` already writes
-`metrics_<dataset>.json` per evaluated corpus; this module additionally writes
-`unifun_breakdown.json` with the per-config table and both a row-weighted and
-an unweighted (macro) average, so the two cannot be confused.
+Pooled F1 over 16 configs is dominated by the largest (x64_O0 and x86_O0
+contribute far more rows than mips_O3), so it can improve while every hard
+config degrades. Alongside the per-corpus `metrics_<dataset>.json` that
+`refun.train` writes, this module emits `unifun_breakdown.json` with the
+per-config table and both a macro and a row-weighted average.
 
 USAGE
 -----
@@ -87,7 +84,7 @@ def _breakdown(output_dir: Path) -> Optional[dict]:
         ),
         "note": (
             "macro_avg weights every config equally; row_weighted follows corpus "
-            "size and is dominated by the O0 configs. Report both."
+            "size and is dominated by the O0 configs."
         ),
     }
 

@@ -98,23 +98,19 @@ CACHE_DIR = "./cache_arrow_10"
 SP_MODEL_PATH = os.environ.get("REFUN_SP_MODEL", "./assets/segmentation.model")
 WORD_CLUSTER_PATH = os.environ.get("REFUN_WORD_CLUSTER", "./assets/word_cluster.json")
 CHUNK_LEN = 512
-# How the four view encoders relate to each other. This is NOT cosmetic -- it
-# changes encoder parameter count by ~3x and it differed between the proposed
-# model and the baselines in the original code:
+# How the four view encoders relate. This changes encoder parameter count by
+# ~3x and differed between the proposed model and the baselines as trained:
 #
-#   "independent"  four deepcopied CodeT5 encoders sharing only `embed_tokens`,
-#                  so each view's attention/FFN weights can specialise.
-#                  This is what the MoE (proposed) model was trained with.
-#   "shared"       one encoder applied to all four views. Views stay
-#                  distinguishable through the <ASM>/<DEC>/<SEXP>/<DESC> marker
-#                  token prepended to each. This is what the concat,
-#                  cross_attention and simple_gating baselines were trained with.
+#   "independent"  four deepcopied encoders sharing only embed_tokens, so each
+#                  view's attention/FFN weights specialise (MoE was trained so).
+#   "shared"       one encoder for all four views, which stay distinguishable
+#                  through the <ASM>/<DEC>/<SEXP>/<DESC> marker token (the
+#                  concat, cross_attention and simple_gating baselines).
 #
-# Defaults below reproduce the trained checkpoints. Note the confound this
-# creates: the proposed model had roughly three extra encoders' worth of
-# parameters relative to its baselines, so part of any MoE gain may be capacity
-# rather than fusion. Use --encoder_mode to hold this constant and separate the
-# two effects.
+# The defaults below reproduce the trained checkpoints. They also mean the
+# proposed model carried ~3 extra encoders' worth of parameters relative to its
+# baselines, so a MoE gain measured at the defaults confounds capacity with
+# fusion; --encoder_mode holds it constant.
 ENCODER_MODE_BY_FUSION = {
     "moe": "independent",
     "concat": "shared",

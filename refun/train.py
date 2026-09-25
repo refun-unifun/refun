@@ -2988,6 +2988,33 @@ def main():
         print(f"Saving final model to {final_model_path}")
         model.save_pretrained(final_model_path)
         tok.save_pretrained(final_model_path)
+
+        # Everything needed to rebuild this exact model for inference.
+        # `training_args.json` below is the HuggingFace dump and does NOT record
+        # the fusion strategy, the encoder mode, or LABEL_LEN -- but the fusion
+        # projection layers are shaped by LABEL_LEN, so loading the state dict
+        # without it fails with a shape mismatch. refun.predict reads this file.
+        run_config = {
+            "fusion": args.fusion,
+            "label_len": LABEL_LEN,
+            "tokens_per_encoder": CHUNK_LEN,
+            "encoder_mode": ENCODER_MODE or ENCODER_MODE_BY_FUSION.get(args.fusion),
+            "model_name": MODEL_NAME,
+            "num_experts": NUM_EXPERTS,
+            "num_selected_experts": NUM_SELECTED_EXPERTS,
+            "moe_loss_weight": MOE_LOSS_WEIGHT,
+            "train_desc_field": args.train_desc_field,
+            "eval_desc_field": args.eval_desc_field,
+            "drop_selfnamed": bool(args.drop_selfnamed),
+            "datasets": list(args.datasets),
+            "seed": args.seed,
+            "start_tag": START_TAG,
+            "end_tag": END_TAG,
+        }
+        with open(os.path.join(final_model_path, "run_config.json"), "w") as f:
+            json.dump(run_config, f, indent=2)
+        print(f"[Main] Wrote run_config.json (fusion={args.fusion}, "
+              f"label_len={LABEL_LEN}, tokens_per_encoder={CHUNK_LEN})")
         # save training args as JSON
         with open(os.path.join(final_model_path, "training_args.json"), "w") as f:
             json.dump(training_args.to_dict(), f, indent=2)

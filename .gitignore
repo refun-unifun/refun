@@ -20,6 +20,7 @@ slurm_runs_*/
 *.pt
 *.pth
 *.model
+!assets/*.model
 *.arrow
 *.safetensors
 
@@ -28,11 +29,13 @@ leakage*.json
 fusion_table.tex
 fusion_results.csv
 
-# Assets that must be provided locally (see README §7)
-assets/segmentation.model
-assets/word_cluster.json
 
 # Editor / OS
 .DS_Store
 .idea/
 .vscode/
+
+# Evaluation assets ARE bundled (see assets/README.md) -- do not ignore them.
+!assets/
+!assets/segmentation.model
+!assets/word_cluster.json

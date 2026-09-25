@@ -36,7 +36,8 @@ refun-release/
 │   ├── unifun.py             # UniFuN entry point + per-config breakdown
 │   ├── datasets.py           # corpus registry (anonymised namespace)
 │   ├── sexpr.py              # tree-sitter AST view generation
-│   ├── audit_leakage.py      # ground-truth leakage measurement  ← read §8
+│   ├── predict.py            # load a checkpoint, run inference  ← §8
+│   ├── audit_leakage.py      # ground-truth leakage measurement  ← read §9
 │   └── data_prep/
 │       ├── run_ghidra.py     # binaries      -> Ghidra JSON
 │       ├── build_corpus.py   # Ghidra JSON   -> HF dataset (3 code views)
@@ -46,8 +47,12 @@ refun-release/
 │   ├── run_experiments.py    # (dataset × fusion) sweeps on local GPUs
 │   ├── submit_slurm.py       # one SLURM job per (dataset × fusion)
 │   ├── make_results_table.py # LaTeX fusion-comparison table
-│   └── smoke_test.sh         # trains all four fusions on a fixture  ← §7
-├── tests/make_fixture.py     # tiny synthetic corpus, real schema
+│   ├── smoke_test.sh         # trains all four fusions on a fixture  ← §7
+│   └── record_dataset_stats.py # refresh ROW_COUNTS from the live corpora
+├── assets/                   # bundled eval assets (segmentation + clusters)
+├── tests/
+│   ├── make_fixture.py       # tiny synthetic corpus, real schema
+│   └── test_units.py         # fast unit checks, no model needed
 ├── configs/.env.example
 └── requirements.txt
 ```
@@ -96,17 +101,31 @@ Outputs land under `--output_dir`: `checkpoints/`, per-epoch dumps in
 
 ## 4. Datasets
 
-All corpora are on the HuggingFace Hub under a **single account, deliberately
-not committed here** — naming it would break double-blind review. Every repo ID
-is stored in `refun/datasets.py` as a bare name and joined to
+### Archival source
+
+**https://zenodo.org/records/15530083**
+
+The corpora are archived on Zenodo — a citable, versioned copy that does not
+depend on any account remaining live. Use this as the reference source; it is
+what the paper cites.
+
+### Hub mirror (for streaming)
+
+The same corpora are mirrored on the HuggingFace Hub under a **single account,
+deliberately not committed here** — naming it would break double-blind review.
+Every repo ID is stored in `refun/datasets.py` as a bare name and joined to
 `$REFUN_HF_NAMESPACE` at load time. Reviewers given the namespace out of band
-can run everything unchanged; without it the code raises an explanatory error
-rather than silently failing.
+can stream everything unchanged; without it the code raises an explanatory
+error rather than silently failing.
 
 ```bash
 export REFUN_HF_NAMESPACE=<hf-account>
 python -m refun.datasets          # print the full resolved inventory
 ```
+
+Either source works. To train from a Zenodo download instead of the Hub, point
+`--datasets` at the extracted directory — `--datasets /data/x64_O0` — which
+loads it with `load_from_disk` and skips the namespace entirely.
 
 **16 compiler configs** — 4 architectures × 4 optimisation levels, built from
 the same package set so cross-config comparisons are like-for-like:
@@ -222,19 +241,128 @@ It builds a 64-row synthetic corpus with the real schema
 epoch each — exercising preprocessing, deduplication, every fusion module, the
 metric callbacks, early stopping, and the inference dump.
 
-The two evaluation assets are optional: a missing SentencePiece segmenter falls
-back to rule-based identifier splitting, and a missing CodeWordNet cluster file
-makes CWordNet-F1 equal plain token-F1. Both absences are announced, never
-silent. Pass `--require_assets` to turn them back into hard errors.
+Both evaluation assets are **bundled in `assets/`**, so nothing needs
+downloading:
 
-| Asset | Purpose | Env var | Flag |
-|---|---|---|---|
-| SentencePiece model | identifier subtoken splitting | `REFUN_SP_MODEL` | `--sp_model_path` |
-| CodeWordNet clusters | synonym F1 | `REFUN_WORD_CLUSTER` | `--word_cluster_path` |
+| Asset | Size | Purpose | Env var | Flag |
+|---|---|---|---|---|
+| `assets/segmentation.model` | 507 KB | identifier subtoken splitting | `REFUN_SP_MODEL` | `--sp_model_path` |
+| `assets/word_cluster.json` | 423 KB | synonym (CWordNet) F1, 18,379 clusters | `REFUN_WORD_CLUSTER` | `--word_cluster_path` |
+
+They affect scoring only — the model never sees them. See
+[`assets/README.md`](assets/README.md). If you point the paths elsewhere and a
+file is missing, the metric degrades with a printed warning rather than
+aborting; `--require_assets` makes absence a hard error, which is what you want
+in a batch job where a warning scrolls past unnoticed.
 
 ---
 
-## 8. Ground-truth leakage — read before quoting a number
+## 8. Loading a trained model and running inference
+
+### What a run writes
+
+```
+runs/moe_x64_O0/
+├── checkpoints/…            per-epoch checkpoints (save_total_limit=2)
+├── eval_outputs/…           per-epoch prediction dumps
+├── inference_results/
+│   ├── metrics_<dataset>.json        precision, recall, F1, exact, CWordNet-F1
+│   └── *_inference_<dataset>.tsv     per-sample gold vs prediction
+└── final_model/             ← the best checkpoint, restored by early stopping
+    ├── pytorch_model.bin    full state dict
+    ├── encoder_{0..3}.bin   per-encoder weights
+    ├── decoder.bin, lm_head.bin, moe_layer.bin
+    ├── run_config.json      ← how to rebuild the model (see below)
+    ├── training_args.json   HuggingFace TrainingArguments dump
+    └── vocab.json, merges.txt, added_tokens.json, …   tokenizer
+```
+
+### Why `run_config.json` matters
+
+`final_model/` cannot be loaded from the weights alone. Two parameters decide
+the *shape* of the model:
+
+- **`fusion`** — picks which of the four classes to instantiate.
+- **`label_len`** — the fusion projection layers are `label_len ×
+  hidden_size`, and it is computed *dynamically* from the training data
+  (longest tokenised name, capped at 15). Rebuilding with the wrong value fails
+  with a shape mismatch on every fusion weight.
+
+Training writes both, plus `encoder_mode`, `tokens_per_encoder`, the MoE
+settings and the dataset list, into `run_config.json`. `refun.predict` reads it
+automatically:
+
+```json
+{
+  "fusion": "moe",
+  "label_len": 9,
+  "tokens_per_encoder": 512,
+  "encoder_mode": "independent",
+  "num_experts": 4,
+  "num_selected_experts": 2,
+  "eval_desc_field": "model_generated_description_test"
+}
+```
+
+Training also resizes the embedding matrix from 32,100 to **32,107** for the
+seven added special tokens (`<ASM>`, `<DEC>`, `<SEXP>`, `<DESC>`, `FUN`, and
+the two name tags). `refun.predict` re-applies the resize before loading the
+state dict; if you write your own loader, do the same or nothing will load.
+
+### Predict
+
+```bash
+# One function from files. The AST view is derived from --code automatically.
+python -m refun.predict --model runs/moe_x64_O0/final_model \
+    --asm func.asm --code func.c
+
+# A whole split, scored against ground truth
+python -m refun.predict --model runs/moe_x64_O0/final_model \
+    --input x64_O0 --split test --limit 500 --out preds.tsv
+
+# A local JSONL or a Zenodo download
+python -m refun.predict --model runs/moe_x64_O0/final_model \
+    --input test.jsonl --out preds.tsv
+python -m refun.predict --model runs/moe_x64_O0/final_model \
+    --input /data/x64_O0 --split test --out preds.tsv
+```
+
+Batch mode prints exact-match and token P/R/F1 at the end. Views you do not
+have may be omitted — the corresponding encoder sees only its marker token —
+but expect a real accuracy drop, particularly without the reasoning view.
+
+For a checkpoint predating `run_config.json`, pass the two shape parameters by
+hand; `--label_len` must match what training used:
+
+```bash
+python -m refun.predict --model old_run/final_model --fusion moe --label_len 9 ...
+```
+
+### From Python
+
+```python
+from refun.predict import load_model, predict_one
+
+model, tok, cfg = load_model("runs/moe_x64_O0/final_model")   # device auto
+name = predict_one(
+    model, tok,
+    asm=open("func.asm").read(),
+    code=open("func.c").read(),
+    desc="Allocates a buffer and writes a build-id section to the output file.",
+    tokens_per_encoder=cfg["tokens_per_encoder"],
+)
+print(name)
+```
+
+### Resuming or fine-tuning
+
+`--resume` continues from the latest checkpoint in `--output_dir`. To fine-tune
+one config's model on another, point `--output_dir` at a fresh directory and
+keep `--fusion` and the token budget identical to the original run.
+
+---
+
+## 9. Ground-truth leakage — read before quoting a number
 
 A function-name model is only interesting if the name is not already in its
 input. On this corpus that is frequently false, via two distinct mechanisms.
@@ -269,7 +397,7 @@ score is the honest presentation.
 
 ---
 
-## 9. The four fusion strategies
+## 10. The four fusion strategies
 
 All four encode the four views (512 tokens each) and feed a shared CodeT5
 decoder. They differ in how the four encoder outputs become the decoder's
@@ -332,7 +460,7 @@ explicit.
 
 ---
 
-## 10. Hyperparameters (defaults, as used in the paper)
+## 11. Hyperparameters (defaults, as used in the paper)
 
 | Setting | Value |
 |---|---|
@@ -351,7 +479,7 @@ explicit.
 
 ---
 
-## 11. Running many experiments
+## 12. Running many experiments
 
 ```bash
 # Local, one or more GPUs
@@ -375,7 +503,7 @@ Generated SLURM scripts `cd` into `--repo_dir`; no absolute paths are baked in.
 
 ---
 
-## 12. Evaluation
+## 13. Evaluation
 
 Names are scored at the **token level**: identifiers are split on camelCase and
 underscores, and precision / recall / F1 computed over token overlap. Exact
@@ -391,3 +519,14 @@ For UniFuN, `unifun_breakdown.json` reports per-config metrics plus **both** a
 macro average (every config weighted equally) and a row-weighted average
 (dominated by the large O0 configs). A pooled score can improve while every hard
 config gets worse, so both are reported.
+
+---
+
+## 14. Citing the data
+
+The corpora are archived at **https://zenodo.org/records/15530083**. Cite that
+record (not the Hub mirror) — it is versioned and has a DOI, so it stays
+resolvable regardless of what happens to any account.
+
+The author block is withheld while double-blind review is in progress; the
+Zenodo record carries the canonical metadata.
